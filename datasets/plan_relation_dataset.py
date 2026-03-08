@@ -1,0 +1,393 @@
+"""
+datasets/plan_relation_dataset.py
+==================================
+PyTorch Dataset for the electrical-plan relation detection task.
+
+Expected directory layout
+--------------------------
+::
+
+    root_dir/
+        {split}/
+            images/           ← image files (*.jpg, *.png, …)
+            labels/           ← YOLO format object annotations
+            pair_labels/      ← ground truth natural pairs
+
+Object annotation format (labels/{name}.txt)
+---------------------------------------------
+One object per line::
+
+    class_id  x_center  y_center  width  height
+
+All coordinates are normalised to [0, 1].  ``class_id`` must be in {0..5}
+and is mapped to an object type via ``YOLO_CLASS_TO_OBJECT_TYPE``.
+
+Pair annotation format (pair_labels/{name}.txt)
+------------------------------------------------
+One ground-truth natural pair per line::
+
+    i  j
+
+where ``i`` and ``j`` are **0-based** indices into the object list for that
+image (i.e. into the corresponding labels file).
+
+Object type encoding
+--------------------
+See ``utils.pair_builder`` for the full mapping.  Summary:
+
+    0 = TEXT          (YOLO class_ids 0, 2, 5)
+    1 = SYMBOL        (YOLO class_ids 1, 3)
+    2 = SYMBOL_TEXT   (YOLO class_id  4)
+
+__getitem__ return value
+------------------------
+A dict with the following keys:
+
+    image_name    str            stem of the image file
+    image         FloatTensor    (C, H_model, W_model) – resized & normalised
+    object_boxes  FloatTensor    (N, 4) – (x1, y1, x2, y2) in model-space pixels
+    object_masks  FloatTensor    (N, H_model, W_model) – binary bbox masks
+    object_types  LongTensor     (N,) – values in {0, 1, 2}
+    pair_indices  LongTensor     (P, 2) – (subject_idx, object_idx)
+    pair_labels   LongTensor     (P,)   – 1 = natural pair, 0 = not
+
+Notes
+-----
+- N (objects per image) may vary.  Batching with ``torch.utils.data.DataLoader``
+  requires a custom ``collate_fn`` that pads N to the batch maximum.
+- The pair ordering is canonical (lower type-id subject first), matching
+  ``PairBuilder._cross_type_indices`` in the architecture.  When the model
+  processes the same sample its ``pair_indices`` will coincide with the
+  dataset's ``pair_indices``, so ``pair_labels`` can be used directly as
+  training targets.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Tuple
+
+import torch
+from torch.utils.data import Dataset
+from torchvision import transforms
+from PIL import Image
+
+from utils.pair_builder import (
+    YOLO_CLASS_TO_OBJECT_TYPE,
+    generate_candidate_pairs,
+    label_candidate_pairs,
+    make_gt_pair_set,
+    validate_object_types,
+    yolo_class_ids_to_object_types,
+)
+
+logger = logging.getLogger(__name__)
+
+# Default normalisation statistics (ImageNet).
+_IMAGENET_MEAN = (0.485, 0.456, 0.406)
+_IMAGENET_STD  = (0.229, 0.224, 0.225)
+
+_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
+
+
+# ────────────────────────────────────────────────────────────────────────── #
+# Dataset class                                                              #
+# ────────────────────────────────────────────────────────────────────────── #
+
+class PlanRelationDataset(Dataset):
+    """Relation detection dataset for electrical plan images.
+
+    Parameters
+    ----------
+    root_dir : str or Path
+        Path to the dataset root containing split sub-directories.
+    split : str
+        Sub-directory name, e.g. ``"train"``, ``"valid"``, ``"test"``.
+    image_size : int
+        Square size that images (and masks) are resized to before being fed
+        to the model.  Must match ``ViredConfig.image_size``.
+    labels_subdir : str
+        Name of the sub-directory that holds YOLO object label files.
+        Defaults to ``"labels"``.
+    pair_labels_subdir : str
+        Name of the sub-directory that holds pair label files.
+        Defaults to ``"pair_labels"``.
+    transform : callable, optional
+        Additional image transform applied *after* the default resize +
+        normalise pipeline.  Receives a ``(C, H, W)`` FloatTensor.
+    """
+
+    def __init__(
+        self,
+        root_dir: str | Path,
+        split: str,
+        image_size: int = 224,
+        labels_subdir: str = "labels",
+        pair_labels_subdir: str = "pair_labels",
+        transform: Optional[Callable] = None,
+    ) -> None:
+        self.split_dir    = Path(root_dir) / split
+        self.images_dir   = self.split_dir / "images"
+        self.labels_dir   = self.split_dir / labels_subdir
+        self.pairs_dir    = self.split_dir / pair_labels_subdir
+        self.image_size   = image_size
+        self.transform    = transform
+
+        if not self.images_dir.exists():
+            raise FileNotFoundError(
+                f"Images directory not found: {self.images_dir}"
+            )
+        if not self.labels_dir.exists():
+            raise FileNotFoundError(
+                f"Object labels directory not found: {self.labels_dir}"
+            )
+
+        # Discover image files and sort for reproducibility.
+        self.image_paths: List[Path] = sorted(
+            p for p in self.images_dir.iterdir()
+            if p.suffix.lower() in _IMAGE_EXTENSIONS
+        )
+
+        if len(self.image_paths) == 0:
+            logger.warning(
+                f"No images found in {self.images_dir} "
+                f"with extensions {_IMAGE_EXTENSIONS}"
+            )
+
+        # Pre-build the default image transform.
+        self._img_transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=_IMAGENET_MEAN, std=_IMAGENET_STD),
+        ])
+
+        logger.info(
+            f"PlanRelationDataset [{split}]: "
+            f"{len(self.image_paths)} images, image_size={image_size}"
+        )
+
+    # ------------------------------------------------------------------ #
+
+    def __len__(self) -> int:
+        return len(self.image_paths)
+
+    # ------------------------------------------------------------------ #
+
+    def __getitem__(self, idx: int) -> Dict:
+        img_path   = self.image_paths[idx]
+        name       = img_path.stem
+        label_path = self.labels_dir / f"{name}.txt"
+        pair_path  = self.pairs_dir  / f"{name}.txt"
+
+        # ── 1. Load image ─────────────────────────────────────────────── #
+        pil_img   = Image.open(img_path).convert("RGB")
+        orig_w, orig_h = pil_img.size                    # (W, H) in PIL convention
+        image_tensor  = self._img_transform(pil_img)     # (C, H_m, W_m)
+
+        if self.transform is not None:
+            image_tensor = self.transform(image_tensor)
+
+        H_m = W_m = self.image_size    # model-space dimensions (square)
+
+        # ── 2. Load object annotations ────────────────────────────────── #
+        boxes_raw, class_ids = _parse_yolo_labels(label_path, orig_w, orig_h)
+        # boxes_raw: (N, 4) as float  (x1, y1, x2, y2) in ORIGINAL pixel coords
+        # class_ids: List[int]
+
+        N = len(class_ids)
+
+        if N == 0:
+            logger.warning(f"No objects found for {name}; returning empty sample.")
+
+        # ── 3. Map class_ids → object types ───────────────────────────── #
+        object_types_list = yolo_class_ids_to_object_types(class_ids)
+        validate_object_types(object_types_list)  # assertion: values in {0,1,2}
+
+        # ── 4. Scale boxes to model-space ─────────────────────────────── #
+        scale_x = W_m / orig_w
+        scale_y = H_m / orig_h
+
+        if N > 0:
+            boxes_model = boxes_raw.clone()
+            boxes_model[:, 0] *= scale_x   # x1
+            boxes_model[:, 2] *= scale_x   # x2
+            boxes_model[:, 1] *= scale_y   # y1
+            boxes_model[:, 3] *= scale_y   # y2
+        else:
+            boxes_model = torch.zeros((0, 4), dtype=torch.float32)
+
+        # ── 5. Generate binary masks ───────────────────────────────────── #
+        object_masks = _boxes_to_masks(boxes_model, H_m, W_m)   # (N, H_m, W_m)
+
+        # ── 6. Load pair ground truth ─────────────────────────────────── #
+        gt_pairs_raw  = _parse_pair_labels(pair_path)
+        gt_pair_set   = make_gt_pair_set(gt_pairs_raw)
+
+        # ── 7. Generate candidate pairs ───────────────────────────────── #
+        candidate_pairs = generate_candidate_pairs(object_types_list)
+        pair_labels_list = label_candidate_pairs(candidate_pairs, gt_pair_set)
+
+        # ── 8. Build output tensors ────────────────────────────────────── #
+        if len(candidate_pairs) > 0:
+            pair_indices = torch.tensor(candidate_pairs, dtype=torch.long)  # (P, 2)
+            pair_labels  = torch.tensor(pair_labels_list, dtype=torch.long) # (P,)
+        else:
+            pair_indices = torch.zeros((0, 2), dtype=torch.long)
+            pair_labels  = torch.zeros((0,),   dtype=torch.long)
+
+        object_types_tensor = torch.tensor(object_types_list, dtype=torch.long)  # (N,)
+
+        # Final assertion: object types must be in {0,1,2}
+        if N > 0:
+            assert object_types_tensor.min() >= 0 and object_types_tensor.max() <= 2, (
+                f"object_types for {name} contain out-of-range values: "
+                f"{object_types_tensor.unique().tolist()}"
+            )
+
+        return {
+            "image_name":   name,
+            "image":        image_tensor,   # (C, H_m, W_m)
+            "object_boxes": boxes_model,    # (N, 4)
+            "object_masks": object_masks,   # (N, H_m, W_m)
+            "object_types": object_types_tensor,  # (N,)
+            "pair_indices": pair_indices,   # (P, 2)
+            "pair_labels":  pair_labels,    # (P,)
+        }
+
+
+# ────────────────────────────────────────────────────────────────────────── #
+# File-parsing helpers (module-level so they are easy to test independently) #
+# ────────────────────────────────────────────────────────────────────────── #
+
+def _parse_yolo_labels(
+    label_path: Path,
+    img_w: float,
+    img_h: float,
+) -> Tuple[torch.Tensor, List[int]]:
+    """Parse a YOLO label file.
+
+    Args:
+        label_path: path to ``{name}.txt``.  If the file does not exist an
+                    empty result is returned (images with no objects are valid).
+        img_w: original image width  in pixels.
+        img_h: original image height in pixels.
+
+    Returns:
+        boxes:     (N, 4) float tensor – (x1, y1, x2, y2) in pixel coordinates.
+        class_ids: list of N integer class ids.
+    """
+    if not label_path.exists():
+        return torch.zeros((0, 4), dtype=torch.float32), []
+
+    boxes: List[List[float]] = []
+    class_ids: List[int] = []
+
+    with open(label_path, "r") as fh:
+        for lineno, raw in enumerate(fh, start=1):
+            raw = raw.strip()
+            if not raw:
+                continue
+            parts = raw.split()
+            if len(parts) != 5:
+                logger.warning(
+                    f"{label_path}:{lineno}: expected 5 fields, "
+                    f"got {len(parts)} – skipping line."
+                )
+                continue
+
+            cid   = int(parts[0])
+            x_c   = float(parts[1])
+            y_c   = float(parts[2])
+            norm_w = float(parts[3])
+            norm_h = float(parts[4])
+
+            if cid not in YOLO_CLASS_TO_OBJECT_TYPE:
+                logger.warning(
+                    f"{label_path}:{lineno}: unknown class_id {cid} – skipping."
+                )
+                continue
+
+            # Convert YOLO normalised (x_c, y_c, w, h) → pixel (x1, y1, x2, y2)
+            x1 = (x_c - norm_w / 2) * img_w
+            y1 = (y_c - norm_h / 2) * img_h
+            x2 = (x_c + norm_w / 2) * img_w
+            y2 = (y_c + norm_h / 2) * img_h
+
+            # Clamp to image bounds.
+            x1 = max(0.0, min(x1, img_w))
+            y1 = max(0.0, min(y1, img_h))
+            x2 = max(0.0, min(x2, img_w))
+            y2 = max(0.0, min(y2, img_h))
+
+            boxes.append([x1, y1, x2, y2])
+            class_ids.append(cid)
+
+    if boxes:
+        return torch.tensor(boxes, dtype=torch.float32), class_ids
+    return torch.zeros((0, 4), dtype=torch.float32), []
+
+
+def _parse_pair_labels(
+    pair_path: Path,
+) -> List[Tuple[int, int]]:
+    """Parse a pair label file.
+
+    Each line contains two space-separated integers ``i j`` (0-based object
+    indices).  If the file does not exist, an empty list is returned (valid for
+    images that have no annotated natural pairs).
+
+    Returns:
+        List of (i, j) integer tuples.
+    """
+    if not pair_path.exists():
+        return []
+
+    pairs: List[Tuple[int, int]] = []
+    with open(pair_path, "r") as fh:
+        for lineno, raw in enumerate(fh, start=1):
+            raw = raw.strip()
+            if not raw:
+                continue
+            parts = raw.split()
+            if len(parts) != 2:
+                logger.warning(
+                    f"{pair_path}:{lineno}: expected 2 fields, "
+                    f"got {len(parts)} – skipping line."
+                )
+                continue
+            pairs.append((int(parts[0]), int(parts[1])))
+
+    return pairs
+
+
+def _boxes_to_masks(
+    boxes: torch.Tensor,  # (N, 4) float – x1,y1,x2,y2 in model-space pixels
+    H: int,
+    W: int,
+) -> torch.Tensor:
+    """Create binary masks by filling each bounding box region with 1.
+
+    Args:
+        boxes: (N, 4) float tensor of bounding boxes in (x1, y1, x2, y2)
+               model-space pixel coordinates.
+        H: mask height in pixels.
+        W: mask width  in pixels.
+
+    Returns:
+        masks: (N, H, W) float32 tensor with 1.0 inside each box, 0.0 outside.
+    """
+    N = boxes.shape[0]
+    masks = torch.zeros((N, H, W), dtype=torch.float32)
+
+    for i in range(N):
+        x1, y1, x2, y2 = boxes[i].tolist()
+        # Convert to integer pixel indices (inclusive).
+        ix1 = max(0, int(round(x1)))
+        iy1 = max(0, int(round(y1)))
+        ix2 = min(W, int(round(x2)))
+        iy2 = min(H, int(round(y2)))
+        if ix2 > ix1 and iy2 > iy1:
+            masks[i, iy1:iy2, ix1:ix2] = 1.0
+
+    return masks
