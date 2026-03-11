@@ -257,7 +257,7 @@ class ObjectEncoder(nn.Module):
                 output_size=self.config.roi_pool_size,
                 spatial_scale=spatial_scale,
                 aligned=True,
-            )                                           # (B*N, D_backbone, P, P)
+            )                                           # (B*N, D_backbone, P, P) # type: ignore
 
             roi_feats = self.roi_encoder(roi_aligned)   # (B*N, roi_feature_dim)
 

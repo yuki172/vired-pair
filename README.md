@@ -35,7 +35,7 @@ vired_model/
         test_forward_pass.py   # smoke tests for the full forward pass
 
 datasets/
-    plan_relation_dataset.py   # PlanRelationDataset (PyTorch Dataset)
+    plan_relation_dataset.py   # ViREDDataset (PyTorch Dataset)
     tests/
         test_pair_generation.py
 
@@ -73,11 +73,11 @@ pair embeddings ──► RelationHead ──► pair logits (B, P, 2)
 
 YOLO class IDs are mapped to three object types:
 
-| Type | Value | YOLO class IDs |
-|---|---|---|
-| TEXT | 0 | 0, 2, 5 |
-| SYMBOL | 1 | 1, 3 |
-| SYMBOL_TEXT | 2 | 4 |
+| Type        | Value | YOLO class IDs |
+| ----------- | ----- | -------------- |
+| TEXT        | 0     | 0, 2, 5        |
+| SYMBOL      | 1     | 1, 3           |
+| SYMBOL_TEXT | 2     | 4              |
 
 Candidate pairs are generated for all cross-type combinations: SYMBOL ↔ TEXT, SYMBOL ↔ SYMBOL_TEXT, TEXT ↔ SYMBOL_TEXT.
 

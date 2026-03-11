@@ -23,7 +23,6 @@ or:
 
 from __future__ import annotations
 
-import pytest
 import torch
 
 from vired_model.config import ViredConfig
@@ -64,7 +63,7 @@ def make_config(**overrides) -> ViredConfig:
         geometry_feature_dim=6,
     )
     defaults.update(overrides)
-    return ViredConfig(**defaults)
+    return ViredConfig(**defaults) # type: ignore
 
 
 def make_inputs(

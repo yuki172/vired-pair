@@ -97,10 +97,11 @@ class ViredRelationModel(nn.Module):
         self,
         image: torch.Tensor,
         object_masks: torch.Tensor,
+        object_valid: torch.Tensor,
         object_boxes: torch.Tensor,
         object_types: torch.Tensor,
+        object_key_padding_mask: Optional[torch.Tensor],
         image_key_padding_mask: Optional[torch.Tensor] = None,
-        object_key_padding_mask: Optional[torch.Tensor] = None,
     ) -> ViredOutput:
         """Run the full ViRED pipeline.
 
@@ -110,18 +111,20 @@ class ViredRelationModel(nn.Module):
             object_masks:
                 (B, N, H, W) – binary float masks, one channel per object.
                 Values should be 0.0 (background) or 1.0 (object region).
+            object_valid:
+                (B, N) boolean tensor, indicates if object is in the labels, not a placeholder.
             object_boxes:
                 (B, N, 4) – bounding boxes in image pixel coordinates,
                 format (x1, y1, x2, y2).
             object_types:
                 (B, N) – integer type id for each object.
                 E.g. 0 = symbol, 1 = text (defined by the dataset).
-            image_key_padding_mask:
-                Optional (B, T) bool tensor passed to the decoder cross-attention.
-                True = ignore that image token (e.g. padding tokens).
             object_key_padding_mask:
                 Optional (B, N) bool tensor passed to the decoder self-attention.
                 True = ignore that object (e.g. padding objects).
+            image_key_padding_mask:
+                Optional (B, T) bool tensor passed to the decoder cross-attention.
+                True = ignore that image token (e.g. padding tokens).
 
         Returns:
             ViredOutput with fields:

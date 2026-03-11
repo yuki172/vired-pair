@@ -95,7 +95,7 @@ _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
 # Dataset class                                                              #
 # ────────────────────────────────────────────────────────────────────────── #
 
-class PlanRelationDataset(Dataset):
+class ViREDDataset(Dataset):
     """Relation detection dataset for electrical plan images.
 
     Parameters
@@ -122,15 +122,13 @@ class PlanRelationDataset(Dataset):
         self,
         root_dir: str | Path,
         split: str,
-        image_size: int = 224,
-        labels_subdir: str = "labels",
-        pair_labels_subdir: str = "pair_labels",
+        image_size: int = 384,
         transform: Optional[Callable] = None,
     ) -> None:
         self.split_dir    = Path(root_dir) / split
         self.images_dir   = self.split_dir / "images"
-        self.labels_dir   = self.split_dir / labels_subdir
-        self.pairs_dir    = self.split_dir / pair_labels_subdir
+        self.labels_dir   = self.split_dir / "labels"
+        self.pairs_dir    = self.split_dir / "pair_labels"
         self.image_size   = image_size
         self.transform    = transform
 
@@ -163,7 +161,7 @@ class PlanRelationDataset(Dataset):
         ])
 
         logger.info(
-            f"PlanRelationDataset [{split}]: "
+            f"ViREDDataset [{split}]: "
             f"{len(self.image_paths)} images, image_size={image_size}"
         )
 
@@ -391,3 +389,116 @@ def _boxes_to_masks(
             masks[i, iy1:iy2, ix1:ix2] = 1.0
 
     return masks
+
+
+def vired_collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor | List[torch.Tensor]]:
+    """
+    Collate function for ViREDDataset.
+
+    Input: list of samples, each containing:
+        image:         (C, H, W)
+        object_masks:  (N_i, H, W)
+        object_boxes:  (N_i, 4)
+        object_types:  (N_i,)
+        pair_labels:   (P_i, 2)
+
+    Returns:
+        images:                    (B, C, H, W)
+        object_masks:              (B, N_max, H, W)
+        object_boxes:              (B, N_max, 4)
+        object_types:              (B, N_max)
+        object_key_padding_mask:   (B, N_max), bool
+                                   True = ignore / padding
+                                   False = valid object
+        pair_labels:               list of length B, each tensor (P_i, 2)
+        pair_labels_mask:          list of length B, each tensor (P_i,)
+                                   optional convenience mask, all True
+        num_objects:               (B,)
+    """
+    if len(batch) == 0:
+        raise ValueError("Received empty batch.")
+
+    images = torch.stack([sample["image"] for sample in batch], dim=0)
+    B, C, H, W = images.shape
+
+    num_objects_list = [sample["object_masks"].shape[0] for sample in batch]
+    N_max = max(num_objects_list)
+
+    device = images.device
+    dtype = images.dtype
+
+    object_masks = torch.zeros((B, N_max, H, W), dtype=dtype, device=device)
+    object_boxes = torch.zeros((B, N_max, 4), dtype=torch.float32, device=device)
+    object_types = torch.zeros((B, N_max), dtype=torch.long, device=device)
+
+    # True = ignore, so start fully padded
+    object_key_padding_mask = torch.ones((B, N_max), dtype=torch.bool, device=device)
+
+    pair_labels = []
+    pair_labels_mask = []
+
+    for i, sample in enumerate(batch):
+        n_i = sample["object_masks"].shape[0]
+
+        object_masks[i, :n_i] = sample["object_masks"]
+        object_boxes[i, :n_i] = sample["object_boxes"]
+        object_types[i, :n_i] = sample["object_types"]
+
+        # real objects => False
+        object_key_padding_mask[i, :n_i] = False
+
+        pair_i = sample["pair_labels"]
+        if pair_i.ndim != 2 or pair_i.shape[-1] != 2:
+            raise ValueError(
+                f"pair_labels for sample {i} must have shape (P, 2), got {tuple(pair_i.shape)}"
+            )
+
+        pair_labels.append(pair_i)
+        pair_labels_mask.append(torch.ones(pair_i.shape[0], dtype=torch.bool, device=pair_i.device))
+
+    num_objects = torch.tensor(num_objects_list, dtype=torch.long, device=device)
+
+    return {
+        "images": images,
+        "object_masks": object_masks,
+        "object_boxes": object_boxes,
+        "object_types": object_types,
+        "object_key_padding_mask": object_key_padding_mask,
+        "pair_labels": pair_labels,
+        "pair_labels_mask": pair_labels_mask,
+        "num_objects": num_objects,
+    }
+
+
+if __name__ == "__main__":
+    config = {
+        "data_path": "data/train"
+    }
+
+    dataset = ViREDDataset(root_dir="data", split="train")
+
+    loader = DataLoader(
+        dataset,
+        batch_size=8,
+        shuffle=True,
+        collate_fn=vired_collate_fn,
+    )
+
+    for i, batch in enumerate(loader):
+        images = batch["images"]                          # (B, C, H, W)
+        object_masks = batch["object_masks"]              # (B, N_max, H, W)
+        object_boxes = batch["object_boxes"]              # (B, N_max, 4)
+        object_types = batch["object_types"]              # (B, N_max)
+        object_key_padding_mask = batch["object_key_padding_mask"]  # (B, N_max)
+        pair_labels = batch["pair_labels"]                # list of B tensors
+
+        print(f" === batch {i} shapes")
+        print("images", images.shape)
+        print("object_boxes", object_boxes.shape)
+        print("object_types", object_types.shape)
+        print("object_key_padding_mask", object_key_padding_mask.shape)
+        print("pair_labels")
+        for pair_label in pair_labels:
+            print(pair_label.shape)
+        print("\n")
+

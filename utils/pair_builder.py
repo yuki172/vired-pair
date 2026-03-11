@@ -148,10 +148,11 @@ def is_feasible_pair(type_i: int, type_j: int) -> bool:
         SYMBOL  ↔ TEXT
         SYMBOL  ↔ SYMBOL_TEXT
         TEXT    ↔ SYMBOL_TEXT
+        SYMBOL_TEXT    ↔ SYMBOL_TEXT
 
     Same-type pairs are never feasible.
     """
-    return type_i != type_j
+    return type_i != type_j or (type_i == SYMBOL_TEXT and type_j == SYMBOL_TEXT)
 
 
 # ────────────────────────────────────────────────────────────────────────── #

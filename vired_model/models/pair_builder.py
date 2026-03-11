@@ -64,6 +64,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 
+from utils.pair_builder import is_feasible_pair
 from vired_model.config import ViredConfig
 from vired_model.utils.tensor_shapes import assert_shape
 
@@ -157,6 +158,7 @@ def compute_pair_geometry_features(
 # ────────────────────────────────────────────────────────────────────────── #
 
 
+
 class PairBuilder(nn.Module):
     """Enumerate candidate pairs and build their (optionally geometry-enriched)
     concatenated embeddings.
@@ -193,7 +195,7 @@ class PairBuilder(nn.Module):
             for j in range(i + 1, N):
                 ti = object_types[i].item()
                 tj = object_types[j].item()
-                if ti != tj:
+                if is_feasible_pair(ti, tj): # type: ignore
                     if ti < tj:
                         rows.append(i)
                         cols.append(j)
@@ -218,12 +220,16 @@ class PairBuilder(nn.Module):
         self,
         object_tokens: torch.Tensor,
         object_types: torch.Tensor,
+        object_key_padding_mask: Optional[torch.Tensor],
         boxes: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
             object_tokens : (B, N, D)
             object_types  : (B, N)   – integer type ids
+            object_key_padding_mask:   (B, N), bool
+                                   True = ignore / padding
+                                   False = valid object
             boxes         : (B, N, 4) – bounding boxes (x1,y1,x2,y2) in
                             image pixel coordinates; required when
                             config.use_geometry_features=True

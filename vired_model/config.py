@@ -41,7 +41,7 @@ class ViredConfig:
     # ------------------------------------------------------------------ #
     # Vision backbone (timm model name)                                   #
     # ------------------------------------------------------------------ #
-    vision_backbone: str = "vit_small_patch16_224"
+    vision_backbone: str = "vit_small_patch16_384"
     # Load pretrained ImageNet weights for the backbone.  Set True when
     # fine-tuning from a pretrained checkpoint; False for random init or
     # when loading a full saved model state_dict.
@@ -92,7 +92,7 @@ class ViredConfig:
     #     vision_backbone="vit_small_patch16_224", image_size=640
     #     Note: ViT self-attention becomes ~67× more expensive than at 224 px.
     #     Consider a CNN backbone (e.g. "convnext_small") for this resolution.
-    image_size: int = 224
+    image_size: int = 384
     image_channels: int = 3
 
     # ------------------------------------------------------------------ #
