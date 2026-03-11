@@ -49,19 +49,21 @@ from __future__ import annotations
 
 from typing import FrozenSet, List, Sequence, Set, Tuple
 
-
-# ────────────────────────────────────────────────────────────────────────── #
-# Object type constants                                                      #
-# ────────────────────────────────────────────────────────────────────────── #
-
+# object types
 TEXT: int = 0
-SYMBOL: int = 1
-SYMBOL_TEXT: int = 2
+SYMBOL_TEXT: int = 1
+SYMBOL: int = 2
+
+# object pairs
+# (0, 1), (0, 2), (1, 2), (1, 1)
+
+
+
 
 OBJECT_TYPE_NAMES: dict[int, str] = {
     TEXT: "TEXT",
-    SYMBOL: "SYMBOL",
     SYMBOL_TEXT: "SYMBOL_TEXT",
+    SYMBOL: "SYMBOL",
 }
 
 VALID_OBJECT_TYPES: frozenset[int] = frozenset({TEXT, SYMBOL, SYMBOL_TEXT})
@@ -211,7 +213,7 @@ def count_candidate_pairs(object_types: Sequence[int]) -> int:
     count = 0
     for i in range(n):
         for j in range(i + 1, n):
-            if object_types[i] != object_types[j]:
+            if is_feasible_pair(object_types[i], object_types[j]):
                 count += 1
     return count
 

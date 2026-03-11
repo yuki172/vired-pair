@@ -38,7 +38,7 @@ from utils.pair_builder import (
     yolo_class_id_to_object_type,
     yolo_class_ids_to_object_types,
 )
-from datasets.plan_relation_dataset import (
+from datasets.ViREDDataset import (
     _boxes_to_masks,
     _parse_pair_labels,
     _parse_yolo_labels,

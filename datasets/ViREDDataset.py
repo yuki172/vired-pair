@@ -72,6 +72,8 @@ import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
 from PIL import Image
+from torch.utils.data import DataLoader
+import cv2
 
 from utils.pair_builder import (
     YOLO_CLASS_TO_OBJECT_TYPE,
@@ -90,15 +92,9 @@ _IMAGENET_STD  = (0.229, 0.224, 0.225)
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
 
-
-# ────────────────────────────────────────────────────────────────────────── #
-# Dataset class                                                              #
-# ────────────────────────────────────────────────────────────────────────── #
-
 class ViREDDataset(Dataset):
-    """Relation detection dataset for electrical plan images.
-
-    Parameters
+    """
+    Args
     ----------
     root_dir : str or Path
         Path to the dataset root containing split sub-directories.
@@ -107,12 +103,6 @@ class ViREDDataset(Dataset):
     image_size : int
         Square size that images (and masks) are resized to before being fed
         to the model.  Must match ``ViredConfig.image_size``.
-    labels_subdir : str
-        Name of the sub-directory that holds YOLO object label files.
-        Defaults to ``"labels"``.
-    pair_labels_subdir : str
-        Name of the sub-directory that holds pair label files.
-        Defaults to ``"pair_labels"``.
     transform : callable, optional
         Additional image transform applied *after* the default resize +
         normalise pipeline.  Receives a ``(C, H, W)`` FloatTensor.
@@ -141,7 +131,6 @@ class ViREDDataset(Dataset):
                 f"Object labels directory not found: {self.labels_dir}"
             )
 
-        # Discover image files and sort for reproducibility.
         self.image_paths: List[Path] = sorted(
             p for p in self.images_dir.iterdir()
             if p.suffix.lower() in _IMAGE_EXTENSIONS
@@ -156,7 +145,6 @@ class ViREDDataset(Dataset):
         # Pre-build the default image transform.
         self._img_transform = transforms.Compose([
             transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
             transforms.Normalize(mean=_IMAGENET_MEAN, std=_IMAGENET_STD),
         ])
 
@@ -165,31 +153,37 @@ class ViREDDataset(Dataset):
             f"{len(self.image_paths)} images, image_size={image_size}"
         )
 
-    # ------------------------------------------------------------------ #
 
     def __len__(self) -> int:
         return len(self.image_paths)
 
-    # ------------------------------------------------------------------ #
 
     def __getitem__(self, idx: int) -> Dict:
-        img_path   = self.image_paths[idx]
-        name       = img_path.stem
+        image_path   = self.image_paths[idx]
+        name       = image_path.stem
         label_path = self.labels_dir / f"{name}.txt"
         pair_path  = self.pairs_dir  / f"{name}.txt"
 
-        # ── 1. Load image ─────────────────────────────────────────────── #
-        pil_img   = Image.open(img_path).convert("RGB")
-        orig_w, orig_h = pil_img.size                    # (W, H) in PIL convention
-        image_tensor  = self._img_transform(pil_img)     # (C, H_m, W_m)
+        # load image, convert to tensor, apply transform
+        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+
+        if image is None:
+            raise ValueError(f"Failed to read image {image_path}")
+
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        H_orig, W_orig = image.shape[:2]
+
+        image_tensor = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
+        image_tensor  = self._img_transform(image_tensor) 
 
         if self.transform is not None:
             image_tensor = self.transform(image_tensor)
 
-        H_m = W_m = self.image_size    # model-space dimensions (square)
+        H_m = W_m = self.image_size 
 
-        # ── 2. Load object annotations ────────────────────────────────── #
-        boxes_raw, class_ids = _parse_yolo_labels(label_path, orig_w, orig_h)
+        # load labels
+        boxes_raw, class_ids = _parse_yolo_labels(label_path, W_orig, H_orig)
         # boxes_raw: (N, 4) as float  (x1, y1, x2, y2) in ORIGINAL pixel coords
         # class_ids: List[int]
 
@@ -198,13 +192,11 @@ class ViREDDataset(Dataset):
         if N == 0:
             logger.warning(f"No objects found for {name}; returning empty sample.")
 
-        # ── 3. Map class_ids → object types ───────────────────────────── #
         object_types_list = yolo_class_ids_to_object_types(class_ids)
-        validate_object_types(object_types_list)  # assertion: values in {0,1,2}
 
-        # ── 4. Scale boxes to model-space ─────────────────────────────── #
-        scale_x = W_m / orig_w
-        scale_y = H_m / orig_h
+        # ── scale boxes to model-space ─────────────────────────────── #
+        scale_x = W_m / W_orig
+        scale_y = H_m / H_orig
 
         if N > 0:
             boxes_model = boxes_raw.clone()
@@ -215,18 +207,18 @@ class ViREDDataset(Dataset):
         else:
             boxes_model = torch.zeros((0, 4), dtype=torch.float32)
 
-        # ── 5. Generate binary masks ───────────────────────────────────── #
+        # ── generate binary masks ───────────────────────────────────── #
         object_masks = _boxes_to_masks(boxes_model, H_m, W_m)   # (N, H_m, W_m)
 
-        # ── 6. Load pair ground truth ─────────────────────────────────── #
-        gt_pairs_raw  = _parse_pair_labels(pair_path)
+        # ── load pair ground truth ─────────────────────────────────── #
+        gt_pairs_raw  = _parse_pair_labels(pair_path, N)
         gt_pair_set   = make_gt_pair_set(gt_pairs_raw)
 
-        # ── 7. Generate candidate pairs ───────────────────────────────── #
+        # ── generate candidate pairs ───────────────────────────────── #
         candidate_pairs = generate_candidate_pairs(object_types_list)
         pair_labels_list = label_candidate_pairs(candidate_pairs, gt_pair_set)
 
-        # ── 8. Build output tensors ────────────────────────────────────── #
+        # ── build output tensors ────────────────────────────────────── #
         if len(candidate_pairs) > 0:
             pair_indices = torch.tensor(candidate_pairs, dtype=torch.long)  # (P, 2)
             pair_labels  = torch.tensor(pair_labels_list, dtype=torch.long) # (P,)
@@ -236,12 +228,6 @@ class ViREDDataset(Dataset):
 
         object_types_tensor = torch.tensor(object_types_list, dtype=torch.long)  # (N,)
 
-        # Final assertion: object types must be in {0,1,2}
-        if N > 0:
-            assert object_types_tensor.min() >= 0 and object_types_tensor.max() <= 2, (
-                f"object_types for {name} contain out-of-range values: "
-                f"{object_types_tensor.unique().tolist()}"
-            )
 
         return {
             "image_name":   name,
@@ -253,10 +239,6 @@ class ViREDDataset(Dataset):
             "pair_labels":  pair_labels,    # (P,)
         }
 
-
-# ────────────────────────────────────────────────────────────────────────── #
-# File-parsing helpers (module-level so they are easy to test independently) #
-# ────────────────────────────────────────────────────────────────────────── #
 
 def _parse_yolo_labels(
     label_path: Path,
@@ -288,11 +270,7 @@ def _parse_yolo_labels(
                 continue
             parts = raw.split()
             if len(parts) != 5:
-                logger.warning(
-                    f"{label_path}:{lineno}: expected 5 fields, "
-                    f"got {len(parts)} – skipping line."
-                )
-                continue
+                raise Exception(f"{label_path}:{lineno}: expected 5 fields, got {len(parts)}")
 
             cid   = int(parts[0])
             x_c   = float(parts[1])
@@ -301,10 +279,7 @@ def _parse_yolo_labels(
             norm_h = float(parts[4])
 
             if cid not in YOLO_CLASS_TO_OBJECT_TYPE:
-                logger.warning(
-                    f"{label_path}:{lineno}: unknown class_id {cid} – skipping."
-                )
-                continue
+                raise Exception(f"{label_path}:{lineno}: unknown class_id {cid} – skipping.")
 
             # Convert YOLO normalised (x_c, y_c, w, h) → pixel (x1, y1, x2, y2)
             x1 = (x_c - norm_w / 2) * img_w
@@ -318,6 +293,9 @@ def _parse_yolo_labels(
             x2 = max(0.0, min(x2, img_w))
             y2 = max(0.0, min(y2, img_h))
 
+            if not (x1 < x2 and y1 < y2):
+                raise Exception(f"invalid labels, f{label_path}")
+
             boxes.append([x1, y1, x2, y2])
             class_ids.append(cid)
 
@@ -328,6 +306,7 @@ def _parse_yolo_labels(
 
 def _parse_pair_labels(
     pair_path: Path,
+    N: int
 ) -> List[Tuple[int, int]]:
     """Parse a pair label file.
 
@@ -335,6 +314,7 @@ def _parse_pair_labels(
     indices).  If the file does not exist, an empty list is returned (valid for
     images that have no annotated natural pairs).
 
+    N: number of objects
     Returns:
         List of (i, j) integer tuples.
     """
@@ -348,12 +328,13 @@ def _parse_pair_labels(
             if not raw:
                 continue
             parts = raw.split()
+
             if len(parts) != 2:
-                logger.warning(
-                    f"{pair_path}:{lineno}: expected 2 fields, "
-                    f"got {len(parts)} – skipping line."
-                )
-                continue
+                raise Exception(f"{pair_path}:{lineno}: expected 2 fields, got {len(parts)}")
+
+            i, j = int(parts[0]), int(parts[1])
+            if not (0 <= i < N and 0 <= j < N):
+                raise Exception(f"{pair_path}: invalid pair, ({i}, {j}), total {N}")
             pairs.append((int(parts[0]), int(parts[1])))
 
     return pairs
@@ -381,10 +362,10 @@ def _boxes_to_masks(
     for i in range(N):
         x1, y1, x2, y2 = boxes[i].tolist()
         # Convert to integer pixel indices (inclusive).
-        ix1 = max(0, int(round(x1)))
-        iy1 = max(0, int(round(y1)))
-        ix2 = min(W, int(round(x2)))
-        iy2 = min(H, int(round(y2)))
+        ix1 = max(0, int(torch.floor(boxes[i, 0]).item()))
+        iy1 = max(0, int(torch.floor(boxes[i, 1]).item()))
+        ix2 = min(W, int(torch.ceil(boxes[i, 2]).item()))
+        iy2 = min(H, int(torch.ceil(boxes[i, 3]).item()))
         if ix2 > ix1 and iy2 > iy1:
             masks[i, iy1:iy2, ix1:ix2] = 1.0
 
@@ -396,13 +377,16 @@ def vired_collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Te
     Collate function for ViREDDataset.
 
     Input: list of samples, each containing:
+        image_name:    str
         image:         (C, H, W)
         object_masks:  (N_i, H, W)
         object_boxes:  (N_i, 4)
         object_types:  (N_i,)
-        pair_labels:   (P_i, 2)
+        pair_indices:  (P_i, 2)
+        pair_labels:   (P_i,)
 
     Returns:
+        image_names:               list of length B, each str
         images:                    (B, C, H, W)
         object_masks:              (B, N_max, H, W)
         object_boxes:              (B, N_max, 4)
@@ -410,19 +394,24 @@ def vired_collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Te
         object_key_padding_mask:   (B, N_max), bool
                                    True = ignore / padding
                                    False = valid object
-        pair_labels:               list of length B, each tensor (P_i, 2)
-        pair_labels_mask:          list of length B, each tensor (P_i,)
-                                   optional convenience mask, all True
+        pair_indices:              (B, P_max, 2)
+        pair_labels:               (B, P_max)
+        pair_labels_padding_mask:  (B, P_max) - true means ignore that pair
         num_objects:               (B,)
     """
     if len(batch) == 0:
         raise ValueError("Received empty batch.")
+    
+    image_names = [sample["image_name"] for sample in batch]
 
     images = torch.stack([sample["image"] for sample in batch], dim=0)
     B, C, H, W = images.shape
 
     num_objects_list = [sample["object_masks"].shape[0] for sample in batch]
     N_max = max(num_objects_list)
+
+    num_pairs_list = [sample["pair_labels"].shape[0] for sample in batch]
+    P_max = max(num_pairs_list)
 
     device = images.device
     dtype = images.dtype
@@ -434,38 +423,49 @@ def vired_collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Te
     # True = ignore, so start fully padded
     object_key_padding_mask = torch.ones((B, N_max), dtype=torch.bool, device=device)
 
-    pair_labels = []
-    pair_labels_mask = []
+    pair_indices = torch.zeros((B, P_max, 2), dtype=torch.long, device=device)
+    pair_labels = torch.zeros((B, P_max), dtype=torch.long, device=device)
 
-    for i, sample in enumerate(batch):
-        n_i = sample["object_masks"].shape[0]
+    # True = ignore, so start fully padded
+    pair_labels_padding_mask = torch.ones((B, P_max), dtype=torch.bool, device=device)
 
-        object_masks[i, :n_i] = sample["object_masks"]
-        object_boxes[i, :n_i] = sample["object_boxes"]
-        object_types[i, :n_i] = sample["object_types"]
+    for b, sample in enumerate(batch):
+        N_b = sample["object_masks"].shape[0]
+
+        object_masks[b, :N_b] = sample["object_masks"]
+        object_boxes[b, :N_b] = sample["object_boxes"]
+        object_types[b, :N_b] = sample["object_types"]
 
         # real objects => False
-        object_key_padding_mask[i, :n_i] = False
+        object_key_padding_mask[b, :N_b] = False
 
-        pair_i = sample["pair_labels"]
-        if pair_i.ndim != 2 or pair_i.shape[-1] != 2:
+        pair_indices_b = sample["pair_indices"]
+        pair_labels_b = sample["pair_labels"]
+        
+        if pair_indices_b.ndim != 2 or pair_indices_b.shape[-1] != 2:
             raise ValueError(
-                f"pair_labels for sample {i} must have shape (P, 2), got {tuple(pair_i.shape)}"
+                f"pair_indices for sample {b} must have shape (P, 2), got {tuple(pair_indices_b.shape)}"
             )
 
-        pair_labels.append(pair_i)
-        pair_labels_mask.append(torch.ones(pair_i.shape[0], dtype=torch.bool, device=pair_i.device))
+        P_b = pair_indices_b.shape[0]
+        pair_indices[b, :P_b] = pair_indices_b
+        pair_labels[b, :P_b] = pair_labels_b
+        pair_labels_padding_mask[b, :P_b] = False
+        
+
 
     num_objects = torch.tensor(num_objects_list, dtype=torch.long, device=device)
 
     return {
+        "image_names": image_names,
         "images": images,
         "object_masks": object_masks,
         "object_boxes": object_boxes,
         "object_types": object_types,
         "object_key_padding_mask": object_key_padding_mask,
+        "pair_indices": pair_indices,
         "pair_labels": pair_labels,
-        "pair_labels_mask": pair_labels_mask,
+        "pair_labels_padding_mask": pair_labels_padding_mask,
         "num_objects": num_objects,
     }
 

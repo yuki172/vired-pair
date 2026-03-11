@@ -13,10 +13,10 @@ Inputs:
                                  config.use_geometry_features=True
 
 Outputs:
-    pair_embeddings : (B, P, 2D [+ G])  – concatenation of the two object
+    pair_embeddings : (B, P_max, 2D [+ G])  – concatenation of the two object
                                           embeddings, with geometry vector
                                           appended when use_geometry_features=True
-    pair_indices    : (B, P, 2)         – (i, j) indices into the N objects
+    pair_indices    : (B, P_max, 2)         – (i, j) indices into the N objects
 
 Pair construction modes
 -----------------------
@@ -80,17 +80,17 @@ def compute_pair_geometry_features(
 ) -> torch.Tensor:
     """Compute a 6-dimensional geometry vector for each candidate pair.
 
-    All computations are fully vectorised over (B, P).
+    All computations are fully vectorised over (B, P_max).
 
     Args:
         boxes:        (B, N, 4)  – bounding boxes in image pixel coordinates,
                                    format (x1, y1, x2, y2).  Degenerate boxes
                                    (zero width/height) are clamped to 1 pixel.
-        pair_indices: (B, P, 2)  – each row is (i, j) into the N objects.
+        pair_indices: (B, P_max, 2)  – each row is (i, j) into the N objects.
         image_size:   int        – image side length used for normalisation.
 
     Returns:
-        geom_features: (B, P, 6)
+        geom_features: (B, P_max, 6)
             dim 0 – dx           : normalised horizontal centre offset
             dim 1 – dy           : normalised vertical centre offset
             dim 2 – dist         : normalised Euclidean distance between centres
@@ -174,8 +174,9 @@ class PairBuilder(nn.Module):
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _cross_type_indices(
+    def _candidate_pair_indices(
         object_types: torch.Tensor,  # (N,)
+        object_key_padding_mask: torch.Tensor, # (N,)
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Return (row_idx, col_idx) for all cross-type pairs.
 
@@ -195,8 +196,8 @@ class PairBuilder(nn.Module):
             for j in range(i + 1, N):
                 ti = object_types[i].item()
                 tj = object_types[j].item()
-                if is_feasible_pair(ti, tj): # type: ignore
-                    if ti < tj:
+                if not object_key_padding_mask[i].item() and not object_key_padding_mask[j].item() and is_feasible_pair(ti, tj): # type: ignore
+                    if ti <= tj:
                         rows.append(i)
                         cols.append(j)
                     else:
@@ -209,10 +210,18 @@ class PairBuilder(nn.Module):
         )
 
     @staticmethod
-    def _all_pair_indices(N: int, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _all_pair_indices(object_key_mask: torch.Tensor, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
         """Return (row_idx, col_idx) for all unordered pairs (i < j)."""
-        rows, cols = torch.triu_indices(N, N, offset=1, device=device)
-        return rows, cols
+        valid_idx = torch.nonzero(~object_key_mask, as_tuple=False).squeeze(-1)
+        if valid_idx.numel() < 2:
+            row_idx = torch.zeros((0,), dtype=torch.long, device=device)
+            col_idx = torch.zeros((0,), dtype=torch.long, device=device)
+        else:
+            r, c = torch.triu_indices(valid_idx.numel(), valid_idx.numel(), offset=1, device=device)
+            row_idx = valid_idx[r]
+            col_idx = valid_idx[c]
+        return row_idx, col_idx
+        
 
     # ------------------------------------------------------------------ #
 
@@ -220,9 +229,9 @@ class PairBuilder(nn.Module):
         self,
         object_tokens: torch.Tensor,
         object_types: torch.Tensor,
-        object_key_padding_mask: Optional[torch.Tensor],
+        object_key_padding_mask: torch.Tensor,
         boxes: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
             object_tokens : (B, N, D)
@@ -235,14 +244,18 @@ class PairBuilder(nn.Module):
                             config.use_geometry_features=True
 
         Returns:
-            pair_embeddings : (B, P, 2*D [+ G])
+            pair_embeddings : (B, P_max, 2*D [+ G])
                               G = config.geometry_feature_dim when
                               use_geometry_features=True and boxes is provided,
                               0 otherwise.
-            pair_indices    : (B, P, 2)   – each row is (i, j)
+            pair_indices    : (B, P_max, 2)   – each row is (i, j)
+            pair_padding_mask      : (B, P_max) False means pair is candidate
         """
         B, N, D = object_tokens.shape
         assert_shape(object_types, (B, N), "object_types")
+        assert_shape(object_key_padding_mask, (B, N), "object_key_padding_mask")
+        if object_key_padding_mask.dtype != torch.bool:
+            raise TypeError("object_key_padding_mask must have dtype torch.bool")
 
         if self.config.use_geometry_features and boxes is None:
             raise ValueError(
@@ -256,11 +269,13 @@ class PairBuilder(nn.Module):
         for b in range(B):
             types_b = object_types[b]      # (N,)
             tokens_b = object_tokens[b]    # (N, D)
+            object_key_mask_b = object_key_padding_mask[b]
 
-            if self.config.pair_mode == "cross_type":
-                row_idx, col_idx = self._cross_type_indices(types_b)
-            else:  # "all"
-                row_idx, col_idx = self._all_pair_indices(N, tokens_b.device)
+            if self.config.pair_mode == "all":
+                row_idx, col_idx = self._all_pair_indices(object_key_mask=object_key_mask_b, device=tokens_b.device)
+            else:  
+                row_idx, col_idx = self._candidate_pair_indices(types_b, object_key_mask_b)
+                
 
             if row_idx.numel() == 0:
                 pair_embs = tokens_b.new_zeros((0, 2 * D))
@@ -274,18 +289,17 @@ class PairBuilder(nn.Module):
             all_pair_embs.append(pair_embs)
             all_pair_idxs.append(pair_idxs)
 
-        try:
-            pair_embeddings = torch.stack(all_pair_embs, dim=0)  # (B, P, 2D)
-            pair_indices = torch.stack(all_pair_idxs, dim=0)     # (B, P, 2)
-        except RuntimeError as exc:
-            raise RuntimeError(
-                "PairBuilder: all batch elements must produce the same number "
-                "of pairs.  Ensure all images in the batch have the same number "
-                "and type distribution of objects, or implement a collation "
-                "strategy that pads to the maximum pair count.  "
-                f"Original error: {exc}"
-            ) from exc
-
+        P_max = max(pair_embs.shape[0] for pair_embs in all_pair_embs)
+        device = object_tokens.device
+        pair_embeddings = torch.zeros((B, P_max, 2 * D), dtype=object_tokens.dtype, device=device)
+        pair_indices = torch.zeros((B, P_max, 2), dtype=torch.long, device=device)
+        pair_padding_mask = torch.ones((B, P_max), dtype=torch.bool, device=device)
+        for b, (pair_embs_b, pair_idxs_b) in enumerate(zip(all_pair_embs, all_pair_idxs)):
+            P_b = pair_embs_b.shape[0]
+            pair_embeddings[b][: P_b] = pair_embs_b
+            pair_indices[b][: P_b] = pair_idxs_b
+            pair_padding_mask[b][: P_b] = False
+            
         # ── Append geometry features ────────────────────────────────────── #
         if self.config.use_geometry_features and boxes is not None:
             assert_shape(boxes, (B, N, 4), "boxes")
@@ -293,15 +307,10 @@ class PairBuilder(nn.Module):
                 boxes=boxes,
                 pair_indices=pair_indices,
                 image_size=self.config.image_size,
-            )   # (B, P, 6)
+            )   # (B, P_max, 6)
+            geom[pair_padding_mask] = 0
             pair_embeddings = torch.cat(
                 [pair_embeddings, geom], dim=-1
-            )   # (B, P, 2D+G)
+            )   # (B, P_max, 2D+G)
 
-        # Verify that pair_embeddings and pair_indices agree on P.
-        assert pair_embeddings.shape[1] == pair_indices.shape[1], (
-            f"pair_embeddings P={pair_embeddings.shape[1]} != "
-            f"pair_indices P={pair_indices.shape[1]}"
-        )
-
-        return pair_embeddings, pair_indices
+        return pair_embeddings, pair_indices, pair_padding_mask
