@@ -28,7 +28,7 @@ vired_model/
         relation_decoder.py    # transformer decoder (object tokens attend to image)
         pair_builder.py        # candidate pair construction + geometry features
         relation_head.py       # MLP classifier → relation logits
-        vired_model.py         # ViredRelationModel top-level class
+        vired_model.py         # ViREDModel top-level class
     utils/
         tensor_shapes.py       # assert_shape helper
     tests/
@@ -104,7 +104,7 @@ After slicing (`data.py`), a fourth directory is added:
 
 ```python
 from vired_model.config import ViredConfig
-from vired_model.models.vired_model import ViredRelationModel
+from vired_model.models.vired_model import ViREDModel
 
 config = ViredConfig(
     vision_backbone="vit_small_patch16_384",
@@ -112,7 +112,7 @@ config = ViredConfig(
     num_object_types=3,
     roi_context_pad=32,
 )
-model = ViredRelationModel(config)
+model = ViREDModel(config)
 
 output = model(image, object_masks, object_boxes, object_types)
 # output.pair_logits  : (B, P, 2)

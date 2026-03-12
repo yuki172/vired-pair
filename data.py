@@ -55,8 +55,8 @@ _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
 
 def slice_dataset(
     input_dir:  str | Path,
-    slice_size: int   = 1280,
-    overlap:    float = 0.2,
+    slice_size: int   = 640,
+    overlap:    float = 0.25,
     splits:     Optional[List[str]] = None,
     labels_subdir:      str = "labels",
     pair_labels_subdir: str = "pair_labels",
@@ -371,3 +371,14 @@ def _write_object_map(path: Path, orig_to_slice: Dict[int, int]) -> None:
     with open(path, "w") as fh:
         for orig_idx, slice_idx in sorted(orig_to_slice.items(), key=lambda kv: kv[1]):
             fh.write(f"{slice_idx} {orig_idx}\n")
+
+
+if __name__ == "__main__":
+    data_config = {
+        "input_dir": "data",
+        "slice_size":  640,
+        "overlap": 0.25,
+    }
+    slice_dataset(
+        input_dir=data_config["input_dir"]
+    )

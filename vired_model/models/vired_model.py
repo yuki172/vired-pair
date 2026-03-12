@@ -1,5 +1,5 @@
 """
-ViredRelationModel – Top-Level Model
+ViREDModel – Top-Level Model
 =====================================
 Assembles all components into a single nn.Module with a clean forward API.
 
@@ -54,16 +54,18 @@ from vired_model.utils.tensor_shapes import assert_shape
 
 @dataclass
 class ViredOutput:
-    """Structured output of ViredRelationModel.forward()."""
+    """Structured output of ViREDModel.forward()."""
 
     pair_logits: torch.Tensor
-    """(B, P, C) – raw (un-normalised) logits for each candidate pair."""
+    """(B, P_max, C) – raw (un-normalised) logits for each candidate pair."""
 
     pair_indices: torch.Tensor
-    """(B, P, 2) – (i, j) indices identifying each pair in the object list."""
+    """(B, P_max, 2) – (i, j) indices identifying each pair in the object list."""
 
+    pair_padding_mask : torch.Tensor
+    """ (B, P_max) - True if pair is padding """
 
-class ViredRelationModel(nn.Module):
+class ViREDModel(nn.Module):
     """ViRED-style relation detection model with geometry and ROI enrichment.
 
     Detects which pairs of objects (e.g. symbol + text) are "natural pairs"
@@ -97,7 +99,6 @@ class ViredRelationModel(nn.Module):
         self,
         image: torch.Tensor,
         object_masks: torch.Tensor,
-        object_valid: torch.Tensor,
         object_boxes: torch.Tensor,
         object_types: torch.Tensor,
         object_key_padding_mask: Optional[torch.Tensor],
@@ -182,27 +183,27 @@ class ViredRelationModel(nn.Module):
         # ── 4. Pair Builder ───────────────────────────────────────────── #
         # Enumerates candidate pairs; appends per-pair geometry vectors
         # when config.use_geometry_features=True.
-        # pair_embeddings : (B, P, 2D [+G])
-        # pair_indices    : (B, P, 2)
-        pair_embeddings, pair_indices = self.pair_builder(
+        # pair_embeddings   : (B, P_max, 2D [+G])
+        # pair_indices      : (B, P_max, 2)
+        # pair_padding_mask : (B, P_max)
+        pair_embeddings, pair_indices, pair_padding_mask = self.pair_builder(
             object_tokens=decoded_tokens,
             object_types=object_types,
             boxes=object_boxes if self.config.use_geometry_features else None,
         )
 
-        P = pair_embeddings.shape[1]
-        assert pair_indices.shape == (B, P, 2), (
-            f"pair_indices shape mismatch: {tuple(pair_indices.shape)}"
-        )
+        P_max = pair_embeddings.shape[1]
+        assert_shape(pair_indices, (B, P_max, 2), "pair_indices")
 
         # ── 5. Relation Head ──────────────────────────────────────────── #
-        # pair_logits : (B, P, C)
+        # pair_logits : (B, P_max, C)
         pair_logits = self.relation_head(pair_embeddings)
-        assert_shape(pair_logits, (B, P, self.config.num_relation_classes), "pair_logits")
+        assert_shape(pair_logits, (B, P_max, self.config.num_relation_classes), "pair_logits")
 
         return ViredOutput(
             pair_logits=pair_logits,
             pair_indices=pair_indices,
+            pair_padding_mask=pair_padding_mask
         )
 
     # ------------------------------------------------------------------ #
@@ -213,6 +214,8 @@ class ViredRelationModel(nn.Module):
         object_masks: torch.Tensor,
         object_boxes: torch.Tensor,
         object_types: torch.Tensor,
+        object_key_padding_mask: Optional[torch.Tensor],
+        image_key_padding_mask: Optional[torch.Tensor] = None,
     ) -> ViredOutput:
         """Convenience wrapper: run a deterministic inference forward pass.
 
@@ -232,7 +235,14 @@ class ViredRelationModel(nn.Module):
         self.eval()
         try:
             with torch.no_grad():
-                return self.forward(image, object_masks, object_boxes, object_types)
+                return self.forward(
+                            image, 
+                            object_masks, 
+                            object_boxes, 
+                            object_types,
+                            object_key_padding_mask,
+                            image_key_padding_mask
+                        )
         finally:
             if was_training:
                 self.train()

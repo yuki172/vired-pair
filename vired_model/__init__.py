@@ -1,4 +1,4 @@
 from vired_model.config import ViredConfig
-from vired_model.models.vired_model import ViredRelationModel, ViredOutput
+from vired_model.models.vired_model import ViREDModel, ViredOutput
 
-__all__ = ["ViredConfig", "ViredRelationModel", "ViredOutput"]
+__all__ = ["ViredConfig", "ViREDModel", "ViredOutput"]

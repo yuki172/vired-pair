@@ -1,5 +1,5 @@
 """
-Smoke tests for the ViredRelationModel.
+Smoke tests for the ViREDModel.
 
 These tests verify:
   - The full forward pass (with bounding boxes) runs without errors.
@@ -26,7 +26,7 @@ from __future__ import annotations
 import torch
 
 from vired_model.config import ViredConfig
-from vired_model.models.vired_model import ViredRelationModel, ViredOutput
+from vired_model.models.vired_model import ViREDModel, ViredOutput
 from vired_model.models.pair_builder import compute_pair_geometry_features
 
 
@@ -118,7 +118,7 @@ class TestForwardPassCrossType:
 
     def setup_method(self):
         self.config = make_config(pair_mode="cross_type")
-        self.model = ViredRelationModel(self.config)
+        self.model = ViREDModel(self.config)
         self.model.eval()
 
     def test_output_is_vired_output(self):
@@ -167,7 +167,7 @@ class TestForwardPassCrossType:
 
     def test_train_mode_runs(self):
         config = make_config(pair_mode="cross_type", dropout=0.1, relation_head_dropout=0.1)
-        model = ViredRelationModel(config)
+        model = ViREDModel(config)
         model.train()
         image, masks, boxes, types = make_inputs()
         out = model(image, masks, boxes, types)
@@ -200,7 +200,7 @@ class TestForwardPassCrossType:
 class TestForwardPassAllPairs:
     def setup_method(self):
         self.config = make_config(pair_mode="all")
-        self.model = ViredRelationModel(self.config)
+        self.model = ViREDModel(self.config)
         self.model.eval()
 
     def test_pair_logits_shape_all(self):
@@ -290,7 +290,7 @@ class TestGeometryFeatures:
         image, masks, boxes, types = make_inputs(B=B, N=N)
 
         config = make_config()
-        model = ViredRelationModel(config)
+        model = ViREDModel(config)
         model.eval()
         out = model(image, masks, boxes, types)
 
@@ -300,7 +300,7 @@ class TestGeometryFeatures:
     def test_geometry_features_disabled(self):
         """With use_geometry_features=False, pair embedding dim should be 2D."""
         config = make_config(use_geometry_features=False)
-        model = ViredRelationModel(config)
+        model = ViREDModel(config)
         model.eval()
         image, masks, boxes, types = make_inputs(B=1, N=4)
         out = model(image, masks, boxes, types)
@@ -317,7 +317,7 @@ class TestROIFeatures:
 
     def test_roi_features_enabled_runs(self):
         config = make_config(use_roi_features=True, roi_feature_dim=16)
-        model = ViredRelationModel(config)
+        model = ViREDModel(config)
         model.eval()
         image, masks, boxes, types = make_inputs(B=1, N=4)
         out = model(image, masks, boxes, types)
@@ -326,7 +326,7 @@ class TestROIFeatures:
     def test_roi_features_disabled_runs(self):
         """Model must run correctly when ROI features are turned off."""
         config = make_config(use_roi_features=False)
-        model = ViredRelationModel(config)
+        model = ViREDModel(config)
         model.eval()
         image, masks, boxes, types = make_inputs(B=1, N=4)
         out = model(image, masks, boxes, types)
@@ -335,7 +335,7 @@ class TestROIFeatures:
     def test_roi_and_geometry_both_disabled(self):
         """Original mask-only mode: both ROI and geometry features off."""
         config = make_config(use_roi_features=False, use_geometry_features=False)
-        model = ViredRelationModel(config)
+        model = ViREDModel(config)
         model.eval()
         image, masks, boxes, types = make_inputs(B=2, N=6)
         out = model(image, masks, boxes, types)
@@ -377,7 +377,7 @@ class TestROIFeatures:
     def test_roi_context_pad_zero_is_default_behaviour(self):
         """roi_context_pad=0 must produce the same logits as the unpadded path."""
         config = make_config(use_roi_features=True, roi_context_pad=0)
-        model = ViredRelationModel(config)
+        model = ViREDModel(config)
         model.eval()
         image, masks, boxes, types = make_inputs(B=1, N=4)
         with torch.no_grad():
@@ -387,7 +387,7 @@ class TestROIFeatures:
     def test_roi_context_pad_nonzero_runs_and_no_nan(self):
         """A nonzero roi_context_pad must run without errors and produce finite output."""
         config = make_config(use_roi_features=True, roi_context_pad=20)
-        model = ViredRelationModel(config)
+        model = ViREDModel(config)
         model.eval()
         image, masks, boxes, types = make_inputs(B=2, N=6)
         with torch.no_grad():
@@ -398,7 +398,7 @@ class TestROIFeatures:
     def test_roi_context_pad_clamps_to_image_boundary(self):
         """Boxes touching the image edge must not cause errors even with large padding."""
         config = make_config(use_roi_features=True, roi_context_pad=500)
-        model = ViredRelationModel(config)
+        model = ViREDModel(config)
         model.eval()
         B, N, H = 1, 4, 224
         image = torch.randn(B, 3, H, H)
@@ -426,8 +426,8 @@ class TestROIFeatures:
         config_with_pad = make_config(use_roi_features=True, roi_context_pad=30)
 
         # Share the same weights so only the padding differs.
-        model_no_pad   = ViredRelationModel(config_no_pad)
-        model_with_pad = ViredRelationModel(config_with_pad)
+        model_no_pad   = ViREDModel(config_no_pad)
+        model_with_pad = ViREDModel(config_with_pad)
         model_with_pad.load_state_dict(
             # Both configs have identical architecture params; weights are
             # compatible except the roi_context_pad flag which is not a weight.
@@ -453,7 +453,7 @@ class TestROIFeatures:
 class TestDecoderNormOrder:
     def _run(self, pre_norm: bool):
         config = make_config(decoder_pre_norm=pre_norm)
-        model = ViredRelationModel(config)
+        model = ViREDModel(config)
         model.eval()
         image, masks, boxes, types = make_inputs(B=1, N=4)
         out = model(image, masks, boxes, types)
@@ -474,7 +474,7 @@ class TestDecoderNormOrder:
 class TestPredictDeterminism:
     def test_predict_is_deterministic_from_train_mode(self):
         config = make_config(dropout=0.5, relation_head_dropout=0.5)
-        model = ViredRelationModel(config)
+        model = ViREDModel(config)
         model.train()
         image, masks, boxes, types = make_inputs(B=1, N=4)
         torch.manual_seed(42)
@@ -487,7 +487,7 @@ class TestPredictDeterminism:
 
     def test_predict_restores_training_mode(self):
         config = make_config(dropout=0.1)
-        model = ViredRelationModel(config)
+        model = ViREDModel(config)
         model.train()
         image, masks, boxes, types = make_inputs(B=1, N=4)
         model.predict(image, masks, boxes, types)
@@ -495,7 +495,7 @@ class TestPredictDeterminism:
 
     def test_predict_preserves_eval_mode(self):
         config = make_config()
-        model = ViredRelationModel(config)
+        model = ViREDModel(config)
         model.eval()
         image, masks, boxes, types = make_inputs(B=1, N=4)
         model.predict(image, masks, boxes, types)
@@ -509,7 +509,7 @@ class TestPredictDeterminism:
 class TestActivationFunctions:
     def _run(self, act: str):
         config = make_config(ffn_activation=act)
-        model = ViredRelationModel(config)
+        model = ViREDModel(config)
         model.eval()
         image, masks, boxes, types = make_inputs(B=1, N=4)
         out = model(image, masks, boxes, types)
@@ -557,12 +557,12 @@ class TestRelationHeadInputDim:
 
 class TestComponentIntegration:
     def test_count_parameters_positive(self):
-        model = ViredRelationModel(make_config())
+        model = ViREDModel(make_config())
         assert model.count_parameters() > 0
 
     def test_gradient_flows_object_encoder(self):
         config = make_config(dropout=0.0)
-        model = ViredRelationModel(config)
+        model = ViREDModel(config)
         model.train()
         image, masks, boxes, types = make_inputs(B=1, N=4)
         out = model(image, masks, boxes, types)
@@ -576,7 +576,7 @@ class TestComponentIntegration:
 
     def test_gradient_flows_vision_encoder(self):
         config = make_config(dropout=0.0)
-        model = ViredRelationModel(config)
+        model = ViREDModel(config)
         model.train()
         image, masks, boxes, types = make_inputs(B=1, N=4)
         out = model(image, masks, boxes, types)
@@ -591,7 +591,7 @@ class TestComponentIntegration:
     def test_gradient_flows_roi_encoder(self):
         """Gradients must reach the ROI encoder projection."""
         config = make_config(dropout=0.0, use_roi_features=True)
-        model = ViredRelationModel(config)
+        model = ViREDModel(config)
         model.train()
         image, masks, boxes, types = make_inputs(B=1, N=4)
         out = model(image, masks, boxes, types)
@@ -607,7 +607,7 @@ class TestComponentIntegration:
     def test_different_embedding_dims(self):
         for d in [32, 128]:
             config = make_config(embedding_dim=d, num_attention_heads=4)
-            model = ViredRelationModel(config)
+            model = ViREDModel(config)
             model.eval()
             image, masks, boxes, types = make_inputs(B=1, N=4)
             out = model(image, masks, boxes, types)
@@ -616,7 +616,7 @@ class TestComponentIntegration:
     def test_non_default_image_size_256(self):
         """image_size=256 must produce a valid square grid (16×16=256 patches)."""
         config = make_config(image_size=256)
-        model = ViredRelationModel(config)
+        model = ViREDModel(config)
         model.eval()
         image, masks, boxes, types = make_inputs(B=1, N=4, H=256, W=256)
         with torch.no_grad():
@@ -644,7 +644,7 @@ class TestComponentIntegration:
 
     def test_relation_head_dropout_applied(self):
         config = make_config(relation_head_dropout=0.9)
-        model = ViredRelationModel(config)
+        model = ViREDModel(config)
         image, masks, boxes, types = make_inputs(B=1, N=4)
         model.train()
         outs = [model(image, masks, boxes, types).pair_logits for _ in range(5)]
@@ -664,7 +664,7 @@ def run_smoke_test() -> None:
     print("Running ViRED smoke test (with geometry + ROI features)...")
 
     config = make_config()
-    model = ViredRelationModel(config)
+    model = ViREDModel(config)
     model.eval()
 
     B, N = 2, 6

@@ -396,7 +396,7 @@ def vired_collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Te
                                    False = valid object
         pair_indices:              (B, P_max, 2)
         pair_labels:               (B, P_max)
-        pair_labels_padding_mask:  (B, P_max) - true means ignore that pair
+        pair_padding_mask:  (B, P_max) - true means ignore that pair
         num_objects:               (B,)
     """
     if len(batch) == 0:
@@ -427,7 +427,7 @@ def vired_collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Te
     pair_labels = torch.zeros((B, P_max), dtype=torch.long, device=device)
 
     # True = ignore, so start fully padded
-    pair_labels_padding_mask = torch.ones((B, P_max), dtype=torch.bool, device=device)
+    pair_padding_mask = torch.ones((B, P_max), dtype=torch.bool, device=device)
 
     for b, sample in enumerate(batch):
         N_b = sample["object_masks"].shape[0]
@@ -450,7 +450,7 @@ def vired_collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Te
         P_b = pair_indices_b.shape[0]
         pair_indices[b, :P_b] = pair_indices_b
         pair_labels[b, :P_b] = pair_labels_b
-        pair_labels_padding_mask[b, :P_b] = False
+        pair_padding_mask[b, :P_b] = False
         
 
 
@@ -465,7 +465,7 @@ def vired_collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Te
         "object_key_padding_mask": object_key_padding_mask,
         "pair_indices": pair_indices,
         "pair_labels": pair_labels,
-        "pair_labels_padding_mask": pair_labels_padding_mask,
+        "pair_padding_mask": pair_padding_mask,
         "num_objects": num_objects,
     }
 
