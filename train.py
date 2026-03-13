@@ -15,6 +15,7 @@ from torch.amp.autocast_mode import autocast
 from utils.eval import pair_metrics
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from sklearn.metrics import average_precision_score, roc_auc_score
+import json
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -194,81 +195,117 @@ class ViREDTrainer:
         """Validate for one epoch."""
         self.model.eval()
         total_loss = 0.0
-        total_dice = 0.0
-        total_iou = 0.0
         pbar = tqdm(self.val_loader, desc='Validation')
         iter_count = 0
-        
+        epoch_scores = []
+        epoch_labels = []
+
         with torch.no_grad():
             for i, batch in enumerate(pbar, 1):
-                image = batch['image'].to(self.device)
-                mask = batch['mask'].to(self.device)
+                image = batch['images'].to(self.device)
+                object_masks = batch['object_masks'].to(self.device)
+                object_boxes = batch['object_boxes'].to(self.device)
+                object_types = batch['object_types'].to(self.device)
+                object_key_padding_mask = batch['object_key_padding_mask'].to(self.device)
+                pair_indices_gt = batch['pair_indices'].to(self.device)
+                pair_labels_gt = batch['pair_labels'].to(self.device)
+                pair_padding_mask_gt = batch['pair_padding_mask'].to(self.device)
                 
                 with autocast(str(self.device), enabled=self.autocast_enabled):
-                    pred = self.model(image)
-                    loss = self.criterion(pred, mask.unsqueeze(1).float()) if self.config.get('criterion', 'BCEWithLogitsLoss') == 'BCEWithLogitsLoss' else self.criterion(pred, mask)
-                
-                pred_probs = torch.sigmoid(pred) if self.config.get('criterion', 'BCEWithLogitsLoss') == 'BCEWithLogitsLoss' else torch.softmax(pred, dim=1)[:, 1:2]
-                metrics = metrics_interactive(pred_probs, mask.unsqueeze(1).float())
+                    output = self.model(
+                                image, 
+                                object_masks, 
+                                object_boxes, 
+                                object_types,
+                                object_key_padding_mask
+                            )
+                    pair_logits = output["pair_logits"]
+                    pair_indices_pred = output["pair_indices"]
+                    pair_padding_mask_pred = output["pair_padding_mask"]
+                    assert torch.equal(pair_indices_gt, pair_indices_pred), f"pair_indices_gt and pair_indices_pred are not equal. pair_indices_gt: {pair_indices_gt.shape} pair_indices_pred: {pair_indices_pred.shape}"
+                    assert torch.equal(pair_padding_mask_gt, pair_padding_mask_pred), f"pair_padding_mask_gt and pair_padding_mask_pred are not equal. pair_padding_mask_gt: {pair_padding_mask_gt.shape} pair_padding_mask_pred: {pair_padding_mask_pred.shape}"
+                    loss = self.criterion(logits=pair_logits, labels=pair_labels_gt, padding_mask=pair_padding_mask_pred)
+
+
                 
                 total_loss += loss.item()
-                total_dice += metrics['dice'].item()
-                total_iou += metrics['iou'].item()
                 iter_count += 1
                 avg_loss = total_loss / iter_count
-                avg_dice = total_dice / iter_count
-                avg_iou = total_iou / iter_count
-                
+                with torch.no_grad():
+                    probs = torch.softmax(pair_logits, dim=-1)[..., 1]
+
+                    valid_mask = ~pair_padding_mask_pred
+
+                    epoch_scores.append(probs[valid_mask].detach().cpu())
+                    epoch_labels.append(pair_labels_gt[valid_mask].detach().cpu())
+            
                 pbar.set_postfix({
                     'loss': f"{loss.item():.4f}",
                     'avg_loss': f"{avg_loss:.4f}",
-                    'dice': f"{avg_dice:.4f}",
-                    'iou': f"{avg_iou:.4f}",
                 })
-        
+                
+        epoch_scores = torch.cat(epoch_scores)
+        epoch_labels = torch.cat(epoch_labels)
+        preds = (epoch_scores >= 0.5).int()
+
+        metrics = {
+            "accuracy": accuracy_score(epoch_labels, preds),
+            "precision": precision_score(epoch_labels, preds, zero_division=0), # type: ignore
+            "recall": recall_score(epoch_labels, preds, zero_division=0), # type: ignore
+            "f1": f1_score(epoch_labels, preds, zero_division=0), # type: ignore
+            "ap": average_precision_score(epoch_labels, epoch_scores),
+            "auroc": roc_auc_score(epoch_labels, epoch_scores),
+        }
+
         return {
             'loss': avg_loss,
-            'dice': avg_dice,
-            'iou': avg_iou
+            "accuracy": metrics["accuracy"],
+            "precision": metrics["precision"],
+            "recall": metrics["recall"],
+            "f1": metrics["f1"],
+            "ap": metrics["ap"],
+            "auroc": metrics["auroc"]
         }
 
     def run(self, epochs: int = 50):
         """Run training loop."""
-        train_losses = []
-        train_dices = []
-        train_ious = []
-        val_losses = []
-        val_dices = []
-        val_ious = []
-        val_loss = float('inf')
+        all_train_metrics = []
+        all_val_metrics = []
+        best_val_accuracy = 0
+        best_val_precision = 0
+        best_val_recall = 0
+        best_val_f1 = 0
+        best_val_ap = 0
+        best_val_auroc = 0
+
         if self.start_validate:
             print("Running initial validation...")
             val_metrics = self.validate_one_epoch()
             val_loss = val_metrics['loss']
-            print(f"Initial Val Loss: {val_loss:.4f} | Dice: {val_metrics['dice']:.4f} | IoU: {val_metrics['iou']:.4f}")
-            val_losses.append(val_loss)
-            val_dices.append(val_metrics['dice'])
-            val_ious.append(val_metrics['iou'])
+            print(f"Initial Val Loss: {val_loss:.4f} | Recall: {val_metrics['recall']:.4f} | Precision: {val_metrics['precision']:.4f} | F1: {val_metrics['f1']:.4f}")
+            all_val_metrics.append(val_metrics)
         for epoch in range(epochs):
             print(f"\n{'='*60}")
             print(f"Epoch {epoch+1}/{epochs}")
             print(f"{'='*60}")
             train_metrics = self.train_one_epoch(epoch)
             train_loss = train_metrics['loss']
-            train_losses.append(train_loss)
-            train_dices.append(train_metrics['dice'])
-            train_ious.append(train_metrics['iou'])
-            print(f"Train Loss: {train_loss:.4f} | Dice: {train_metrics['dice']:.4f} | IoU: {train_metrics['iou']:.4f}")
+            all_train_metrics.append(train_metrics)
+            print(f"Train Loss: {train_loss:.4f} | Recall: {val_metrics['recall']:.4f} | Precision: {val_metrics['precision']:.4f} | F1: {val_metrics['f1']:.4f}")
             if self.validate:
                 val_metrics = self.validate_one_epoch()
                 val_loss = val_metrics['loss']
-                val_losses.append(val_loss)
-                val_dices.append(val_metrics['dice'])
-                val_ious.append(val_metrics['iou'])
-                print(f"Val Loss: {val_loss:.4f} | Dice: {val_metrics['dice']:.4f} | IoU: {val_metrics['iou']:.4f}")
+                print(f"Initial Val Loss: {val_loss:.4f} | Recall: {val_metrics['recall']:.4f} | Precision: {val_metrics['precision']:.4f} | F1: {val_metrics['f1']:.4f}")
+                all_val_metrics.append(val_metrics)
                 self.scheduler.step(val_loss)
                 if val_loss < self.best_val_loss:
                     self.best_val_loss = val_loss
+                    best_val_accuracy = val_metrics['accuracy']
+                    best_val_precision = val_metrics['precision']
+                    best_val_recall = val_metrics['recall']
+                    best_val_f1 = val_metrics['f1']
+                    best_val_ap = val_metrics['ap']
+                    best_val_auroc = val_metrics['auroc']
                     best_path = os.path.join(
                         self.save_path,
                         f'best_val_{val_loss:.4f}_train_{train_loss:.4f}.pth'
@@ -287,69 +324,139 @@ class ViREDTrainer:
                         'scheduler_state_dict': self.scheduler.state_dict(),
                         'val_loss': val_loss,
                         'train_loss': train_loss,
+                        'val_metrics': val_metrics,
+                        'train_metrics': train_metrics,
                         'best_val_loss': self.best_val_loss,
                     }, checkpoint_path)
                     print(f"✓ Saved checkpoint: {checkpoint_path}")
             else:
                 self.scheduler.step(train_loss)
-                val_losses.append(float('inf'))
-                val_dices.append(0.0)
-                val_ious.append(0.0)
+                all_val_metrics.append({})
                 if (epoch + 1) % 5 == 0:
                     checkpoint_path = os.path.join(
                         self.save_path,
-                        f'checkpoint_epoch_{epoch+1}_val_{val_loss:.4f}.pth'
+                        f'checkpoint_epoch_{epoch+1}.pth'
                     )
                     torch.save(self.model.state_dict(), checkpoint_path)
                     print(f"✓ Saved checkpoint: {checkpoint_path}")
+
+        train_losses = [train_metrics['loss'] for train_metrics in all_train_metrics]
+        train_precisions = [train_metrics['precision'] for train_metrics in all_train_metrics]
+        train_recalls = [train_metrics['recall'] for train_metrics in all_train_metrics]
+        train_f1s = [train_metrics['f1'] for train_metrics in all_train_metrics]
+        train_aps = [train_metrics['ap'] for train_metrics in all_train_metrics]
+        train_aurocs = [train_metrics['auroc'] for train_metrics in all_train_metrics]
+
+        val_losses = [val_metrics['loss'] if 'loss' in val_metrics else float('inf') for val_metrics in all_val_metrics]
+        val_precisions = [val_metrics['precision'] if 'precision' in val_metrics else 0  for val_metrics in all_val_metrics]
+        val_recalls = [val_metrics['recall'] if 'recall' in val_metrics else 0  for val_metrics in all_val_metrics]
+        val_f1s = [val_metrics['f1'] if 'f1' in val_metrics else 0  for val_metrics in all_val_metrics]
+        val_aps = [val_metrics['ap'] if 'ap' in val_metrics else 0  for val_metrics in all_val_metrics]
+        val_aurocs = [val_metrics['auroc'] if 'auroc' in val_metrics else 0  for val_metrics in all_val_metrics]
         
-        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+        fig, axes = plt.subplots(2, 3, figsize=(18, 6))
         
         epochs_range = range(1, len(train_losses) + 1)
-        axes[0].plot(epochs_range, train_losses, 'b-', label='Training Loss', linewidth=2)
+
+        axes[0, 0].plot(epochs_range, train_losses, 'b-', label='Training Loss', linewidth=2)
         if self.validate and len(val_losses) > 0:
             if self.start_validate:
                 val_epochs = [0] + list(range(1, len(val_losses)))
             else:
                 val_epochs = range(1, len(val_losses) + 1)
-            axes[0].plot(val_epochs, val_losses, 'r-', label='Validation Loss', linewidth=2)
-        axes[0].set_xlabel('Epoch', fontsize=12)
-        axes[0].set_ylabel('Loss', fontsize=12)
-        axes[0].set_title('Training and Validation Loss', fontsize=14, fontweight='bold')
-        axes[0].legend(fontsize=11)
-        axes[0].grid(True, alpha=0.3)
-        
-        axes[1].plot(epochs_range, train_dices, 'b-', label='Training Dice', linewidth=2)
-        if self.validate and len(val_dices) > 0:
+            axes[0, 0].plot(val_epochs, val_losses, 'r-', label='Validation Loss', linewidth=2)
+        axes[0, 0].set_xlabel('Epoch', fontsize=12)
+        axes[0, 0].set_ylabel('Loss', fontsize=12)
+        axes[0, 0].set_title('Training and Validation Loss', fontsize=14, fontweight='bold')
+        axes[0, 0].legend(fontsize=11)
+        axes[0, 0].grid(True, alpha=0.3)
+
+        axes[0, 1].plot(epochs_range, train_precisions, 'b-', label='Training Precision', linewidth=2)
+        if self.validate and len(val_precisions) > 0:
             if self.start_validate:
-                val_epochs = [0] + list(range(1, len(val_dices)))
+                val_epochs = [0] + list(range(1, len(val_precisions)))
             else:
-                val_epochs = range(1, len(val_dices) + 1)
-            axes[1].plot(val_epochs, val_dices, 'r-', label='Validation Dice', linewidth=2)
-        axes[1].set_xlabel('Epoch', fontsize=12)
-        axes[1].set_ylabel('Dice Coefficient', fontsize=12)
-        axes[1].set_title('Training and Validation Dice', fontsize=14, fontweight='bold')
-        axes[1].legend(fontsize=11)
-        axes[1].grid(True, alpha=0.3)
-        
-        axes[2].plot(epochs_range, train_ious, 'b-', label='Training IoU', linewidth=2)
-        if self.validate and len(val_ious) > 0:
+                val_epochs = range(1, len(val_precisions) + 1)
+            axes[0, 1].plot(val_epochs, val_precisions, 'r-', label='Validation Precision', linewidth=2)
+        axes[0, 1].set_xlabel('Epoch', fontsize=12)
+        axes[0, 1].set_ylabel('Precision', fontsize=12)
+        axes[0, 1].set_title('Training and Validation Precision', fontsize=14, fontweight='bold')
+        axes[0, 1].legend(fontsize=11)
+        axes[0, 1].grid(True, alpha=0.3)
+
+        axes[0, 2].plot(epochs_range, train_recalls, 'b-', label='Training Recall', linewidth=2)
+        if self.validate and len(val_recalls) > 0:
             if self.start_validate:
-                val_epochs = [0] + list(range(1, len(val_ious)))
+                val_epochs = [0] + list(range(1, len(val_recalls)))
             else:
-                val_epochs = range(1, len(val_ious) + 1)
-            axes[2].plot(val_epochs, val_ious, 'r-', label='Validation IoU', linewidth=2)
-        axes[2].set_xlabel('Epoch', fontsize=12)
-        axes[2].set_ylabel('IoU', fontsize=12)
-        axes[2].set_title('Training and Validation IoU', fontsize=14, fontweight='bold')
-        axes[2].legend(fontsize=11)
-        axes[2].grid(True, alpha=0.3)
+                val_epochs = range(1, len(val_recalls) + 1)
+            axes[0, 2].plot(val_epochs, val_recalls, 'r-', label='Validation Recall', linewidth=2)
+        axes[0, 2].set_xlabel('Epoch', fontsize=12)
+        axes[0, 2].set_ylabel('Recall', fontsize=12)
+        axes[0, 2].set_title('Training and Validation Recall', fontsize=14, fontweight='bold')
+        axes[0, 2].legend(fontsize=11)
+        axes[0, 2].grid(True, alpha=0.3)
+
+        axes[1, 0].plot(epochs_range, train_f1s, 'b-', label='Training F1', linewidth=2)
+        if self.validate and len(val_f1s) > 0:
+            if self.start_validate:
+                val_epochs = [0] + list(range(1, len(val_f1s)))
+            else:
+                val_epochs = range(1, len(val_f1s) + 1)
+            axes[1, 0].plot(val_epochs, val_f1s, 'r-', label='Validation F1', linewidth=2)
+        axes[1, 0].set_xlabel('Epoch', fontsize=12)
+        axes[1, 0].set_ylabel('F1', fontsize=12)
+        axes[1, 0].set_title('Training and Validation F1', fontsize=14, fontweight='bold')
+        axes[1, 0].legend(fontsize=11)
+        axes[1, 0].grid(True, alpha=0.3)
+
+        axes[1, 1].plot(epochs_range, train_aps, 'b-', label='Training AP', linewidth=2)
+        if self.validate and len(val_aps) > 0:
+            if self.start_validate:
+                val_epochs = [0] + list(range(1, len(val_aps)))
+            else:
+                val_epochs = range(1, len(val_aps) + 1)
+            axes[0, 1].plot(val_epochs, val_aps, 'r-', label='Validation AP', linewidth=2)
+        axes[1, 1].set_xlabel('Epoch', fontsize=12)
+        axes[1, 1].set_ylabel('AP', fontsize=12)
+        axes[1, 1].set_title('Training and Validation AP', fontsize=14, fontweight='bold')
+        axes[1, 1].legend(fontsize=11)
+        axes[1, 1].grid(True, alpha=0.3)
+
+        axes[1, 2].plot(epochs_range, train_aurocs, 'b-', label='Training AUROC', linewidth=2)
+        if self.validate and len(val_aurocs) > 0:
+            if self.start_validate:
+                val_epochs = [0] + list(range(1, len(val_aurocs)))
+            else:
+                val_epochs = range(1, len(val_aurocs) + 1)
+            axes[1, 2].plot(val_epochs, val_aurocs, 'r-', label='Validation AUROC', linewidth=2)
+        axes[1, 2].set_xlabel('Epoch', fontsize=12)
+        axes[1, 2].set_ylabel('AUROC', fontsize=12)
+        axes[1, 2].set_title('Training and Validation AUROC', fontsize=14, fontweight='bold')
+        axes[1, 2].legend(fontsize=11)
+        axes[1, 2].grid(True, alpha=0.3)
         
         plt.tight_layout()
         plot_path = os.path.join(self.save_path, 'training_curves.png')
         plt.savefig(plot_path, dpi=300, bbox_inches='tight')
         plt.close()
         print(f"✓ Saved training curves plot: {plot_path}")
+
+        metrics = {
+            "best_val_loss": self.best_val_loss,
+            "best_val_accuracy": best_val_accuracy,
+            "best_val_precision": best_val_precision,
+            "best_val_recall": best_val_recall,
+            "best_val_f1": best_val_f1,
+            "best_val_ap": best_val_ap,
+            "best_val_auroc": best_val_auroc,
+            "train_metrics": [{epoch: i, **train_metrics} for i, train_metrics in enumerate(all_train_metrics)],
+            "val_metrics": [{epoch: i, **val_metrics} for i, val_metrics in enumerate(all_val_metrics)],
+        }
+
+        metrics_path = os.path.join(self.save_path, 'metrics.json')
+        with open(metrics_path, "w") as f:
+            json.dump(metrics, f, indent=4)
         
         print(f"\n{'='*60}")
         print("Training complete!")
