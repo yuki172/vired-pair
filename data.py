@@ -43,6 +43,7 @@ from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+from utils.data import clip_box_to_slice
 
 logger = logging.getLogger(__name__)
 
@@ -230,7 +231,7 @@ def _slice_image(
         orig_to_slice: Dict[int, int] = {}   # original index → slice-local index
 
         for orig_idx, (class_id, x1, y1, x2, y2) in enumerate(objects_px):
-            clipped = _clip_box_to_slice(x1, y1, x2, y2, x_off, y_off, slice_size)
+            clipped = clip_box_to_slice(x1, y1, x2, y2, x_off, y_off, slice_size)
             if clipped is None:
                 continue  # no intersection with this tile
 
@@ -303,22 +304,6 @@ def _extract_slice(img: np.ndarray, x: int, y: int,
     return crop
 
 
-def _clip_box_to_slice(
-    x1: float, y1: float, x2: float, y2: float,
-    x_off: int, y_off: int, slice_size: int,
-) -> Optional[Tuple[float, float, float, float]]:
-    """Clip a bounding box (full-image pixel coords) to a tile window.
-
-    Returns the clipped box in full-image pixel coordinates, or ``None``
-    if the box does not intersect the tile at all.
-    """
-    cx1 = max(x1, x_off)
-    cy1 = max(y1, y_off)
-    cx2 = min(x2, x_off + slice_size)
-    cy2 = min(y2, y_off + slice_size)
-    if cx2 <= cx1 or cy2 <= cy1:
-        return None
-    return cx1, cy1, cx2, cy2
 
 
 # ── File I/O ──────────────────────────────────────────────────────────────── #
