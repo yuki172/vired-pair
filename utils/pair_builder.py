@@ -50,9 +50,9 @@ from __future__ import annotations
 from typing import FrozenSet, List, Sequence, Set, Tuple
 
 # object types
-TEXT: int = 0
-SYMBOL_TEXT: int = 1
-SYMBOL: int = 2
+TEXT_OBJECT_CLASS: int = 0
+SYMBOL_TEXT_OBJECT_CLASS: int = 1
+SYMBOL_OBJECT_CLASS: int = 2
 
 # object pairs
 # (0, 1), (0, 2), (1, 2), (1, 1)
@@ -61,24 +61,24 @@ SYMBOL: int = 2
 
 
 OBJECT_TYPE_NAMES: dict[int, str] = {
-    TEXT: "TEXT",
-    SYMBOL_TEXT: "SYMBOL_TEXT",
-    SYMBOL: "SYMBOL",
+    TEXT_OBJECT_CLASS: "TEXT",
+    SYMBOL_TEXT_OBJECT_CLASS: "SYMBOL_TEXT",
+    SYMBOL_OBJECT_CLASS: "SYMBOL",
 }
 
-VALID_OBJECT_TYPES: frozenset[int] = frozenset({TEXT, SYMBOL, SYMBOL_TEXT})
+VALID_OBJECT_TYPES: frozenset[int] = frozenset({TEXT_OBJECT_CLASS, SYMBOL_OBJECT_CLASS, SYMBOL_TEXT_OBJECT_CLASS})
 
 # ────────────────────────────────────────────────────────────────────────── #
 # YOLO class_id → object type mapping                                       #
 # ────────────────────────────────────────────────────────────────────────── #
 
 YOLO_CLASS_TO_OBJECT_TYPE: dict[int, int] = {
-    0: TEXT,
-    2: TEXT,
-    5: TEXT,
-    1: SYMBOL,
-    3: SYMBOL,
-    4: SYMBOL_TEXT,
+    0: TEXT_OBJECT_CLASS,
+    2: TEXT_OBJECT_CLASS,
+    5: TEXT_OBJECT_CLASS,
+    1: SYMBOL_OBJECT_CLASS,
+    3: SYMBOL_OBJECT_CLASS,
+    4: SYMBOL_TEXT_OBJECT_CLASS,
 }
 
 # The full set of known YOLO class ids (for validation).
@@ -154,7 +154,7 @@ def is_feasible_pair(type_i: int, type_j: int) -> bool:
 
     Same-type pairs are never feasible.
     """
-    return type_i != type_j or (type_i == SYMBOL_TEXT and type_j == SYMBOL_TEXT)
+    return type_i != type_j or (type_i == SYMBOL_TEXT_OBJECT_CLASS and type_j == SYMBOL_TEXT_OBJECT_CLASS)
 
 
 # ────────────────────────────────────────────────────────────────────────── #

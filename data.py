@@ -43,11 +43,10 @@ from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
-from utils.data import clip_box_to_slice
+from utils.data import clip_box_to_slice, IMAGE_EXTENSIONS
 
 logger = logging.getLogger(__name__)
 
-_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -161,7 +160,7 @@ def _process_split(
 
     image_files = sorted(
         p for p in images_dir.iterdir()
-        if p.suffix.lower() in _IMAGE_EXTENSIONS
+        if p.suffix.lower() in IMAGE_EXTENSIONS
     )
     total_slices = 0
     for img_path in image_files:

@@ -84,13 +84,10 @@ from utils.pair_builder import (
     yolo_class_ids_to_object_types,
 )
 
+from utils.data import IMAGENET_MEAN, IMAGE_EXTENSIONS, IMAGENET_STD, boxes_to_masks
 logger = logging.getLogger(__name__)
 
-# Default normalisation statistics (ImageNet).
-_IMAGENET_MEAN = (0.485, 0.456, 0.406)
-_IMAGENET_STD  = (0.229, 0.224, 0.225)
 
-_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
 
 class ViREDDataset(Dataset):
     """
@@ -133,19 +130,19 @@ class ViREDDataset(Dataset):
 
         self.image_paths: List[Path] = sorted(
             p for p in self.images_dir.iterdir()
-            if p.suffix.lower() in _IMAGE_EXTENSIONS
+            if p.suffix.lower() in IMAGE_EXTENSIONS
         )
 
         if len(self.image_paths) == 0:
             logger.warning(
                 f"No images found in {self.images_dir} "
-                f"with extensions {_IMAGE_EXTENSIONS}"
+                f"with extensions {IMAGE_EXTENSIONS}"
             )
 
         # Pre-build the default image transform.
         self._img_transform = transforms.Compose([
             transforms.Resize((image_size, image_size)),
-            transforms.Normalize(mean=_IMAGENET_MEAN, std=_IMAGENET_STD),
+            transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
         ])
 
         logger.info(
@@ -208,7 +205,7 @@ class ViREDDataset(Dataset):
             boxes_model = torch.zeros((0, 4), dtype=torch.float32)
 
         # ── generate binary masks ───────────────────────────────────── #
-        object_masks = _boxes_to_masks(boxes_model, H_m, W_m)   # (N, H_m, W_m)
+        object_masks = boxes_to_masks(boxes_model, H_m, W_m)   # (N, H_m, W_m)
 
         # ── load pair ground truth ─────────────────────────────────── #
         gt_pairs_raw  = _parse_pair_labels(pair_path, N)
@@ -340,36 +337,7 @@ def _parse_pair_labels(
     return pairs
 
 
-def _boxes_to_masks(
-    boxes: torch.Tensor,  # (N, 4) float – x1,y1,x2,y2 in model-space pixels
-    H: int,
-    W: int,
-) -> torch.Tensor:
-    """Create binary masks by filling each bounding box region with 1.
 
-    Args:
-        boxes: (N, 4) float tensor of bounding boxes in (x1, y1, x2, y2)
-               model-space pixel coordinates.
-        H: mask height in pixels.
-        W: mask width  in pixels.
-
-    Returns:
-        masks: (N, H, W) float32 tensor with 1.0 inside each box, 0.0 outside.
-    """
-    N = boxes.shape[0]
-    masks = torch.zeros((N, H, W), dtype=torch.float32)
-
-    for i in range(N):
-        x1, y1, x2, y2 = boxes[i].tolist()
-        # Convert to integer pixel indices (inclusive).
-        ix1 = max(0, int(torch.floor(boxes[i, 0]).item()))
-        iy1 = max(0, int(torch.floor(boxes[i, 1]).item()))
-        ix2 = min(W, int(torch.ceil(boxes[i, 2]).item()))
-        iy2 = min(H, int(torch.ceil(boxes[i, 3]).item()))
-        if ix2 > ix1 and iy2 > iy1:
-            masks[i, iy1:iy2, ix1:ix2] = 1.0
-
-    return masks
 
 
 def vired_collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor | List[torch.Tensor]]:
